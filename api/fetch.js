@@ -22,7 +22,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // URL может прийти как ?url= или /api/fetch/<encoded>
+  // --- Получаем URL ---
   let target = req.query.url;
   if (!target && req.url.startsWith('/api/fetch/')) {
     const raw = req.url.replace(/^\/api\/fetch\//, '');
@@ -30,15 +30,15 @@ module.exports = async (req, res) => {
   }
 
   if (!target) {
-    res.status(404).end('url must be provided as ?url=... or /api/fetch/<encoded-url>');
+    res.status(400).end('url must be provided as ?url=... or /api/fetch/<encoded-url>');
     return;
   }
 
   let remoteURL;
   try {
     remoteURL = new URL(target);
-  } catch (e) {
-    res.status(404).end('invalid url');
+  } catch {
+    res.status(400).end('invalid url');
     return;
   }
 
@@ -48,25 +48,33 @@ module.exports = async (req, res) => {
   }
 
   if (config.blacklist_hostname_regex.test(remoteURL.hostname)) {
-    res.status(400).end('naughty, naughty...');
+    res.status(403).end('naughty, naughty...');
     return;
   }
 
-  // Копируем заголовки, удаляем лишнее
+  // --- Подготовка заголовков ---
   const headers = { ...req.headers };
+
+  // Удаляем лишние заголовки, которые ломают прокси
   delete headers.host;
   delete headers.origin;
   delete headers.referer;
-
-  // Ставим нормальный User-Agent, если его нет
-  headers['user-agent'] =
-    headers['user-agent'] ||
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36';
-
-  // Убираем Transfer-Encoding (иногда ломает поток)
   delete headers['transfer-encoding'];
 
-  // Таймаут
+  // Ставим нормальный User-Agent, если его нет
+  if (!headers['user-agent']) {
+    headers['user-agent'] =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36';
+  }
+
+  // Опционально можно добавить X-Forwarded-For (реальный IP клиента)
+  if (req.headers['x-forwarded-for']) {
+    headers['x-forwarded-for'] += `, ${req.socket.remoteAddress}`;
+  } else {
+    headers['x-forwarded-for'] = req.socket.remoteAddress;
+  }
+
+  // --- Таймаут запроса ---
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.proxy_request_timeout_ms);
 
@@ -92,20 +100,20 @@ module.exports = async (req, res) => {
 
   clearTimeout(timeout);
 
-  // Прокидываем статус
+  // --- Пробрасываем статус ---
   res.status(upstream.status);
 
-  // Прокидываем заголовки (кроме content-encoding)
+  // --- Пробрасываем заголовки ответа ---
   upstream.headers.forEach((value, key) => {
-    if (key.toLowerCase() !== 'content-encoding') {
+    if (!['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) {
       res.setHeader(key, value);
     }
   });
 
-  // Ещё раз ставим CORS
+  // Добавляем CORS заголовки ещё раз
   addCORSHeaders(req, res);
 
-  // Потоким тело
+  // --- Стримим тело ответа ---
   if (!upstream.body) {
     res.end();
     return;
