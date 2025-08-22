@@ -22,10 +22,8 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // 1) URL может приходить как query ?url=
+  // URL может прийти как ?url= или /api/fetch/<encoded>
   let target = req.query.url;
-
-  // 2) или из пути /api/fetch/<encoded>
   if (!target && req.url.startsWith('/api/fetch/')) {
     const raw = req.url.replace(/^\/api\/fetch\//, '');
     if (raw) target = decodeURIComponent(raw);
@@ -54,11 +52,19 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // Готовим заголовки
+  // Копируем заголовки, удаляем лишнее
   const headers = { ...req.headers };
   delete headers.host;
   delete headers.origin;
   delete headers.referer;
+
+  // Ставим нормальный User-Agent, если его нет
+  headers['user-agent'] =
+    headers['user-agent'] ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36';
+
+  // Убираем Transfer-Encoding (иногда ломает поток)
+  delete headers['transfer-encoding'];
 
   // Таймаут
   const controller = new AbortController();
@@ -78,6 +84,7 @@ module.exports = async (req, res) => {
     if (err.name === 'AbortError') {
       res.status(504).end('upstream timeout');
     } else {
+      console.error('Fetch error:', err);
       res.status(502).end('upstream error');
     }
     return;
@@ -88,7 +95,7 @@ module.exports = async (req, res) => {
   // Прокидываем статус
   res.status(upstream.status);
 
-  // Прокидываем заголовки
+  // Прокидываем заголовки (кроме content-encoding)
   upstream.headers.forEach((value, key) => {
     if (key.toLowerCase() !== 'content-encoding') {
       res.setHeader(key, value);
@@ -98,10 +105,11 @@ module.exports = async (req, res) => {
   // Ещё раз ставим CORS
   addCORSHeaders(req, res);
 
-  // Стримим тело
+  // Потоким тело
   if (!upstream.body) {
     res.end();
     return;
   }
+
   upstream.body.pipe(res);
 };
